@@ -1,6 +1,6 @@
 {
   "name": "@bloume/id",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted browser fingerprinting, anti-spoofing and visitor identity SDK by Bloume SAS",
   "license": "MIT",
   "author": "Bloume SAS",
