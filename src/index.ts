@@ -36,7 +36,7 @@ import type {
   FingerprintJSGetOptions,
 } from "./types";
 
-export const SDK_VERSION = "1.0.0";
+export const SDK_VERSION = "1.1.0";
 
 function parseBrowserAndOsClient(ua: string): {
   browserName: string;
@@ -127,11 +127,40 @@ export class BloumeID {
   ): this {
     this.options[key] = value as Required<BloumeIDOptions>[K];
     this.cachedResult = null;
+    this.cachedData = null;
     return this;
   }
 
   private isExcluded(name: CollectorName): boolean {
     return this.options.exclude.includes(name);
+  }
+
+  private cachedData: {
+    expiresAt: number;
+    data: {
+      fullHash: string;
+      hardwareHash: string;
+      durationMs: number;
+      collectorCount: number;
+      signalsCount: number;
+      components: FingerprintComponents;
+    };
+  } | null = null;
+
+  private async withCollectorTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((resolve) => {
+          timer = setTimeout(() => resolve(fallback), timeoutMs);
+        }),
+      ]);
+    } catch {
+      return fallback;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   public async getFingerprintData(): Promise<{
@@ -142,6 +171,9 @@ export class BloumeID {
     signalsCount: number;
     components: FingerprintComponents;
   }> {
+    if (this.cachedData && this.cachedData.expiresAt > Date.now()) {
+      return { ...this.cachedData.data, durationMs: 0 };
+    }
     const startTime = typeof performance !== "undefined" ? performance.now() : Date.now();
 
     const canvas = this.isExcluded("canvas")
@@ -277,7 +309,17 @@ export class BloumeID {
             maxTextureDimension2D: 0,
             maxBindGroups: 0,
           })
-        : collectWebGPU(),
+        : this.withCollectorTimeout(collectWebGPU(), 300, {
+            available: false,
+            vendor: "timeout",
+            architecture: "timeout",
+            device: "timeout",
+            description: "timeout",
+            limitsHash: "timeout",
+            features: [],
+            maxTextureDimension2D: 0,
+            maxBindGroups: 0,
+          }),
       this.isExcluded("audio")
         ? Promise.resolve({
             available: false,
@@ -287,7 +329,14 @@ export class BloumeID {
             maxChannelCount: 0,
             doubleRenderConsistent: true,
           })
-        : collectAudio(),
+        : this.withCollectorTimeout(collectAudio(), 300, {
+            available: false,
+            sampleHash: "timeout",
+            sumValue: 0,
+            sampleRate: 0,
+            maxChannelCount: 0,
+            doubleRenderConsistent: true,
+          }),
       this.isExcluded("userAgentData")
         ? Promise.resolve({
             userAgent: "",
@@ -319,8 +368,15 @@ export class BloumeID {
             localIpPresent: false,
             sdpFeedbackHash: "excluded",
           })
-        : collectWebRTC(),
-      this.isExcluded("mediaCodecs") ? Promise.resolve(undefined) : collectMediaCodecs(),
+        : this.withCollectorTimeout(collectWebRTC(), 300, {
+            available: false,
+            candidateTypes: [],
+            localIpPresent: false,
+            sdpFeedbackHash: "timeout",
+          }),
+      this.isExcluded("mediaCodecs")
+        ? Promise.resolve(undefined)
+        : this.withCollectorTimeout(collectMediaCodecs(), 300, undefined),
     ]);
 
     const antiSpoof = this.isExcluded("antiSpoof")
@@ -418,7 +474,7 @@ export class BloumeID {
     const endTime = typeof performance !== "undefined" ? performance.now() : Date.now();
     const durationMs = Math.max(1, Math.round(endTime - startTime));
 
-    return {
+    const resultData = {
       fullHash,
       hardwareHash,
       durationMs,
@@ -426,6 +482,15 @@ export class BloumeID {
       signalsCount: 104,
       components,
     };
+
+    if (this.options.cacheLifetimeMs > 0) {
+      this.cachedData = {
+        expiresAt: Date.now() + this.options.cacheLifetimeMs,
+        data: resultData,
+      };
+    }
+
+    return resultData;
   }
 
   public async getFingerprint(): Promise<string> {
