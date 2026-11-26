@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import sdkPkg from "../package.json";
 import {
   BloumeID,
   FingerprintJS,
@@ -34,14 +35,14 @@ import {
 import { runAntiSpoofProbes } from "./probes";
 
 describe("@bloume/id v1.0.0 — 70+ Signals, Anti-Spoof, Dual API (ThumbmarkJS + Fingerprint.com) & Server Client", () => {
-  it("reports v1.0.0 and instantiates with default and custom options", () => {
-    expect(SDK_VERSION).toBe("1.0.0");
+  it("reports dynamic SDK_VERSION and instantiates with default and custom options", () => {
+    expect(SDK_VERSION).toBe(sdkPkg.version);
     const client = new BloumeID({
       apiKey: "bid_pub_test123",
       endpoint: "https://id.bloume.example/",
       options: { exclude: ["webrtc"], timeout: 4000, cacheLifetimeMs: 1000 },
     });
-    expect(client.version).toBe("1.0.0");
+    expect(client.version).toBe(SDK_VERSION);
     expect(client.getOptions().apiKey).toBe("bid_pub_test123");
     expect(client.getOptions().endpoint).toBe("https://id.bloume.example");
     expect(client.getOptions().options.exclude).toEqual(["webrtc"]);
