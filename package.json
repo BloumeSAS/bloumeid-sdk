@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bloumesas/bloumeid-sdk.git",
+    "url": "git+https://github.com/BloumeSAS/bloumeid-sdk.git",
     "directory": "packages/bloumeid"
   },
   "type": "module",
