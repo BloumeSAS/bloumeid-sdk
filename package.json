@@ -56,7 +56,6 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.16.4",
-    "@bloumeid/config": "workspace:*",
     "@types/node": "^22.9.0",
     "@typescript-eslint/eslint-plugin": "^8.15.0",
     "@typescript-eslint/parser": "^8.15.0",
