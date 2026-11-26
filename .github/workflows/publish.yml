@@ -1,4 +1,4 @@
-name: Publish @bloume/id to npm
+name: Publish @bloume/id to npm & GitHub Packages
 
 on:
   release:
@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 jobs:
   publish:
@@ -24,6 +25,11 @@ jobs:
       - run: pnpm install
       - run: pnpm build
       - run: pnpm test
-      - run: npm publish --provenance --access public
+      - name: Publish to npm
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to GitHub Packages
+        run: npm publish --registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
