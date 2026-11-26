@@ -47,7 +47,6 @@ Every published version of `@bloume/id` is **built and signed on GitHub Actions*
 
 ## ✍️ Example
 
-### Browser
 ```typescript
 import { BloumeID } from "@bloume/id";
 
@@ -58,19 +57,4 @@ const client = new BloumeID({
 
 const result = await client.get({ tag: "checkout" });
 console.log(result.visitorId, result.thumbmark, result.info.dangerLevel);
-```
-
-### Server Verification (`@bloume/id/server`)
-```typescript
-import { BloumeIDServer } from "@bloume/id/server";
-
-const server = new BloumeIDServer({
-  secretKey: process.env.BLOUMEID_SECRET_KEY!,
-  endpoint: "https://your-bloumeid-instance.com",
-});
-
-const verified = await server.verifyRequest(requestId);
-if (verified.info.isBot || verified.info.dangerLevel >= 3) {
-  // Block or challenge request
-}
 ```
