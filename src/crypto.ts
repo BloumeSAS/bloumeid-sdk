@@ -236,19 +236,25 @@ export async function encryptFingerprintEnvelope(params: {
     return null;
   }
 
-  const keyBytes = deriveTransportAesKeyBytes(
-    params.publicKey,
-    params.ts,
-    params.nonce,
-    params.origin
-  );
   const iv = new Uint8Array(12);
   globalThis.crypto.getRandomValues(iv);
 
-  const cryptoKey = await subtle.importKey(
+  const ikmKey = await subtle.importKey(
     "raw",
-    keyBytes as unknown as BufferSource,
-    { name: "AES-GCM" },
+    utf8Bytes(params.publicKey) as unknown as BufferSource,
+    "HKDF",
+    false,
+    ["deriveKey"]
+  );
+  const cryptoKey = await subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: utf8Bytes(`${params.ts}:${params.nonce}`) as unknown as BufferSource,
+      info: utf8Bytes(`bloumeid-transport-v2:${params.origin}`) as unknown as BufferSource,
+    },
+    ikmKey,
+    { name: "AES-GCM", length: 256 },
     false,
     ["encrypt"]
   );
