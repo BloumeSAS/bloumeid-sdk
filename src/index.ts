@@ -42,7 +42,7 @@ import type {
   UserAgentDataComponent,
 } from "./types";
 
-export const SDK_VERSION = "1.3.0";
+export const SDK_VERSION = "1.3.1";
 
 function normalizeVersionToken(raw: string): string {
   const parts = raw.split(".").filter((p) => /^\d+$/.test(p));
