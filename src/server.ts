@@ -98,8 +98,8 @@ export class BloumeIDServer {
   }
 
   public async verifyRequest(requestId: string): Promise<VerifiedRequestResponse> {
-    if (!requestId || !requestId.startsWith("req_")) {
-      throw new Error("Invalid requestId: must start with 'req_'");
+    if (!requestId || !/^req_[0-9a-zA-Z_]+$/.test(requestId)) {
+      throw new Error("Invalid requestId: must match req_<snowflake>");
     }
     return this.request<VerifiedRequestResponse>(
       `/api/v1/requests/${encodeURIComponent(requestId)}`
@@ -107,8 +107,8 @@ export class BloumeIDServer {
   }
 
   public async getVisitor(visitorId: string): Promise<VisitorProfileResponse> {
-    if (!visitorId || !visitorId.startsWith("vis_")) {
-      throw new Error("Invalid visitorId: must start with 'vis_'");
+    if (!visitorId || !/^vis_[0-9a-zA-Z_]+$/.test(visitorId)) {
+      throw new Error("Invalid visitorId: must match vis_<snowflake>");
     }
     return this.request<VisitorProfileResponse>(
       `/api/v1/visitors/${encodeURIComponent(visitorId)}`
