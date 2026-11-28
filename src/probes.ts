@@ -135,13 +135,41 @@ async function probeWorkerConsistency(mainHardware: HardwareComponent): Promise<
 
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    let url: string | null = null;
+    let worker: Worker | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (worker) {
+        try {
+          worker.terminate();
+        } catch {
+          // Ignore termination errors
+        }
+        worker = null;
+      }
+      if (url) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // Ignore URL revocation errors
+        }
+        url = null;
+      }
+    };
+
     const finish = (mismatch: boolean) => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve(mismatch);
     };
 
-    const timer = setTimeout(() => finish(false), 180);
+    timer = setTimeout(() => finish(false), 180);
 
     try {
       const code = `self.onmessage = function() {
@@ -152,32 +180,26 @@ async function probeWorkerConsistency(mainHardware: HardwareComponent): Promise<
         });
       };`;
       const blob = new Blob([code], { type: "application/javascript" });
-      const url = URL.createObjectURL(blob);
-      const worker = new Worker(url);
+      url = URL.createObjectURL(blob);
+      worker = new Worker(url);
 
       worker.onmessage = (evt: MessageEvent<{ ua: string; platform: string; hc: number }>) => {
-        clearTimeout(timer);
-        URL.revokeObjectURL(url);
-        worker.terminate();
         const data = evt.data;
         const mainUa = typeof navigator !== "undefined" ? navigator.userAgent : "";
         const mismatch =
-          data.ua !== mainUa ||
-          data.platform !== mainHardware.platform ||
-          (data.hc > 0 && data.hc !== mainHardware.hardwareConcurrency);
+          Boolean(data) &&
+          (data.ua !== mainUa ||
+            data.platform !== mainHardware.platform ||
+            (data.hc > 0 && data.hc !== mainHardware.hardwareConcurrency));
         finish(mismatch);
       };
 
       worker.onerror = () => {
-        clearTimeout(timer);
-        URL.revokeObjectURL(url);
-        worker.terminate();
         finish(false);
       };
 
       worker.postMessage("probe");
     } catch {
-      clearTimeout(timer);
       finish(false);
     }
   });

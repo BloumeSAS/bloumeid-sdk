@@ -1,10 +1,10 @@
 <div align="center">
 
-# `@bloume/id` — BloumeID SDK (`@bloume/id v1.3.1`)
+# `@bloume/id` — BloumeID SDK (`@bloume/id v1.3.2`)
 
 **SDK JavaScript/TypeScript Zéro Dépendance pour [BloumeID](https://github.com/BloumeSAS/BloumeID) — Fingerprinting 104 Signaux, Anti-Spoofing & Dual-API**
 
-[![Version](https://img.shields.io/badge/version-v1.3.1-635bff?style=for-the-badge)](https://www.npmjs.com/package/@bloume/id)
+[![Version](https://img.shields.io/badge/version-v1.3.2-635bff?style=for-the-badge)](https://www.npmjs.com/package/@bloume/id)
 [![npm](https://img.shields.io/npm/v/@bloume/id?style=for-the-badge&color=cb3837&logo=npm)](https://www.npmjs.com/package/@bloume/id)
 [![Bundle Size](https://img.shields.io/badge/bundle-%3C%2040%20Ko-10b981?style=for-the-badge)](https://www.npmjs.com/package/@bloume/id)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-10b981?style=for-the-badge)](package.json)

@@ -42,7 +42,7 @@ import type {
   UserAgentDataComponent,
 } from "./types";
 
-export const SDK_VERSION = "1.3.1";
+export const SDK_VERSION = "1.3.2";
 
 function normalizeVersionToken(raw: string): string {
   const parts = raw.split(".").filter((p) => /^\d+$/.test(p));
@@ -634,20 +634,25 @@ export class BloumeID {
 
       try {
         const controller = new AbortController();
-        const timer = setTimeout(
-          () => controller.abort(),
-          getOptions?.timeout ?? this.options.timeout
-        );
-        const response = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-BloumeID-Key": this.apiKey,
-          },
-          body: JSON.stringify(wireEnvelope),
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
+        const requestedTimeout = getOptions?.timeout ?? this.options.timeout;
+        const timeoutMs = Number.isFinite(requestedTimeout)
+          ? Math.max(100, requestedTimeout)
+          : 5000;
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        let response: Response;
+        try {
+          response = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-BloumeID-Key": this.apiKey,
+            },
+            body: JSON.stringify(wireEnvelope),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
 
         if (response.ok) {
           const rawServer = (await response.json()) as Partial<BloumeIDResult> & {
