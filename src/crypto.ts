@@ -189,3 +189,88 @@ export function computeAntiReplaySignature(
   const canonical = `${timestamp}.${nonce}.${fullHash}.${hardwareHash}`;
   return hmacSha256Hex(publicKey, canonical);
 }
+
+export function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i] ?? 0);
+  }
+  const base64 =
+    typeof btoa === "function"
+      ? btoa(binary)
+      : Buffer.from(bytes).toString("base64");
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+export function base64UrlToBytes(input: string): Uint8Array {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((input.length + 3) % 4);
+  if (typeof atob === "function") {
+    const binary = atob(padded);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  }
+  return new Uint8Array(Buffer.from(padded, "base64"));
+}
+
+export function deriveTransportAesKeyBytes(
+  publicKey: string,
+  ts: number,
+  nonce: string,
+  origin: string
+): Uint8Array {
+  return sha256Bytes(utf8Bytes(`bloumeid-transport-v2:${publicKey}:${ts}:${nonce}:${origin}`));
+}
+
+export async function encryptFingerprintEnvelope(params: {
+  publicKey: string;
+  ts: number;
+  nonce: string;
+  origin: string;
+  payload: Record<string, unknown>;
+}): Promise<{ v: 2; ts: number; nonce: string; iv: string; ciphertext: string } | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof globalThis.crypto?.getRandomValues !== "function") {
+    return null;
+  }
+
+  const keyBytes = deriveTransportAesKeyBytes(
+    params.publicKey,
+    params.ts,
+    params.nonce,
+    params.origin
+  );
+  const iv = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(iv);
+
+  const cryptoKey = await subtle.importKey(
+    "raw",
+    keyBytes as unknown as BufferSource,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"]
+  );
+
+  const plaintext = utf8Bytes(JSON.stringify(params.payload));
+  const aad = utf8Bytes(`${params.publicKey}:${params.ts}:${params.nonce}:${params.origin}`);
+  const encryptedBuf = await subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as unknown as BufferSource,
+      additionalData: aad as unknown as BufferSource,
+      tagLength: 128,
+    },
+    cryptoKey,
+    plaintext as unknown as BufferSource
+  );
+
+  return {
+    v: 2,
+    ts: params.ts,
+    nonce: params.nonce,
+    iv: bytesToBase64Url(iv),
+    ciphertext: bytesToBase64Url(new Uint8Array(encryptedBuf)),
+  };
+}
