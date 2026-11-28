@@ -414,4 +414,73 @@ describe("@bloume/id v1.0.0 — 70+ Signals, Anti-Spoof, Dual API (ThumbmarkJS +
     expect(visitor.visitCount).toBe(4);
     fetchSpy.mockRestore();
   });
+
+  it("terminates Web Worker, revokes Blob URL on probe timeout, and clears fetch timers on error", async () => {
+    const origWorker = globalThis.Worker;
+    const origCreateObjectUrl = URL.createObjectURL;
+    const origRevokeObjectUrl = URL.revokeObjectURL;
+
+    let terminated = false;
+    let revokedUrl: string | null = null;
+    class HangingWorkerStub {
+      public onmessage: ((evt: MessageEvent) => void) | null = null;
+      public onerror: (() => void) | null = null;
+      public postMessage() {
+        // Deliberately never respond to exercise timeout cleanup
+      }
+      public terminate() {
+        terminated = true;
+      }
+    }
+
+    Object.defineProperty(globalThis, "Worker", {
+      value: HangingWorkerStub,
+      configurable: true,
+      writable: true,
+    });
+    URL.createObjectURL = vi.fn(() => "blob:bloumeid-worker-test");
+    URL.revokeObjectURL = vi.fn((u: string) => {
+      revokedUrl = u;
+    });
+
+    try {
+      const probeResult = await runAntiSpoofProbes({
+        canvas: collectCanvas(),
+        audio: await collectAudio(),
+        hardware: collectHardware(),
+        webgl: collectWebGL(),
+        languages: collectLanguages(),
+        storage: await collectStorage(),
+        timezoneIntl: collectTimezoneIntl(),
+      });
+      expect(probeResult.workerMismatch).toBe(false);
+      expect(terminated).toBe(true);
+      expect(revokedUrl).toBe("blob:bloumeid-worker-test");
+    } finally {
+      Object.defineProperty(globalThis, "Worker", {
+        value: origWorker,
+        configurable: true,
+        writable: true,
+      });
+      URL.createObjectURL = origCreateObjectUrl;
+      URL.revokeObjectURL = origRevokeObjectUrl;
+    }
+
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("Network offline"));
+
+    const sdk = new BloumeID({
+      apiKey: "bid_pub_offline_test",
+      endpoint: "https://bloumeid.internal",
+      options: { exclude: ["webrtc", "audio", "webgpu"], timeout: 0 },
+    });
+    const res = await sdk.get();
+    expect(res.visitorId).toMatch(/^vis_local_/);
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+
+    fetchSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+  });
 });
