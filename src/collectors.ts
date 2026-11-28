@@ -612,11 +612,18 @@ export function collectHardware(): HardwareComponent {
 
   const nav = navigator as unknown as Record<string, unknown>;
   const ua = navigator.userAgent || "";
+  const platform = String(navigator.platform || "unknown");
   let architectureHint = "x86_64";
-  if (/arm64|aarch64|apple/i.test(ua)) {
+  if (/\b(arm64|aarch64)\b/i.test(ua) || /\b(arm64|aarch64)\b/i.test(platform)) {
     architectureHint = "arm64";
-  } else if (/armv7|arm/i.test(ua)) {
+  } else if (/\b(armv7|armv8l|arm)\b/i.test(ua) || /\b(armv7|armv8l|arm)\b/i.test(platform)) {
     architectureHint = "arm";
+  } else if (/\b(win64|wow64|x86_64|x64|amd64)\b/i.test(ua) || /win32/i.test(platform)) {
+    architectureHint = "x86_64";
+  } else if (/\b(i686|i386|x86)\b/i.test(ua)) {
+    architectureHint = "x86";
+  } else if (/iphone|ipad|ipod/i.test(ua)) {
+    architectureHint = "arm64";
   }
 
   return {

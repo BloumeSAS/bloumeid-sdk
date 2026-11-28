@@ -4,9 +4,12 @@ import type {
   CanvasComponent,
   HardwareComponent,
   LanguagesComponent,
+  MediaCodecsComponent,
+  SpeechComponent,
   StorageComponent,
   TimezoneIntlComponent,
   WebGLComponent,
+  WebRTCComponent,
 } from "./types";
 
 const AUTOMATION_GLOBALS = [
@@ -215,6 +218,9 @@ export async function runAntiSpoofProbes(params: {
   languages: LanguagesComponent;
   storage: StorageComponent;
   timezoneIntl?: TimezoneIntlComponent;
+  mediaCodecs?: MediaCodecsComponent;
+  speech?: SpeechComponent;
+  webrtc?: WebRTCComponent;
 }): Promise<AntiSpoofComponent> {
   const reasons: string[] = [];
   const automationArtifacts: string[] = [];
@@ -310,6 +316,42 @@ export async function runAntiSpoofProbes(params: {
     reasons.push("navigator.language inconsistent with navigator.languages[0]");
   }
 
+  // Tor Browser multi-marker signature detection
+  let torMarkerCount = 0;
+  const tzValue = params.timezoneIntl?.timezone ?? "";
+  if (tzValue === "Atlantic/Reykjavik" || (tzValue === "UTC" && params.timezoneIntl?.timezoneOffsetMinutes === 0 && (params.languages.language === "en-US"))) {
+    torMarkerCount += 1;
+  }
+  if (params.webgl.vendor === "Mozilla" && params.webgl.renderer === "Mozilla") {
+    torMarkerCount += 1;
+  }
+  if (
+    params.webrtc &&
+    params.webrtc.available === false &&
+    params.speech &&
+    params.speech.voiceCount === 0 &&
+    (params.mediaCodecs ? params.mediaCodecs.audioInputCount === 0 : true)
+  ) {
+    torMarkerCount += 1;
+  }
+  if (canvasNoiseDetected) {
+    torMarkerCount += 1;
+  }
+  if (params.hardware.globalPrivacyControl === true && params.hardware.deviceMemory === 0) {
+    torMarkerCount += 1;
+  }
+  const hasMozillaWebGlWithNonFirefoxUa =
+    (params.webgl.vendor === "Mozilla" || params.webgl.renderer === "Mozilla") &&
+    !/Firefox\//i.test(ua);
+  if (hasMozillaWebGlWithNonFirefoxUa) {
+    torMarkerCount += 1;
+  }
+
+  const isTorBrowser = torMarkerCount >= 3;
+  if (isTorBrowser) {
+    reasons.push("Tor Browser environment signature detected");
+  }
+
   const isIncognito = await detectPrivateMode(params.storage);
 
   const isBot =
@@ -327,6 +369,7 @@ export async function runAntiSpoofProbes(params: {
     prototypeTampered ||
     stackEngineMismatch ||
     timezoneDstMismatch ||
+    hasMozillaWebGlWithNonFirefoxUa ||
     !params.languages.consistentMainLanguage;
 
   return {
@@ -334,6 +377,7 @@ export async function runAntiSpoofProbes(params: {
     isSpoofed,
     isIncognito,
     isVirtualMachine,
+    isTorBrowser,
     webdriver,
     automationArtifacts,
     chromeObjectAnomaly,

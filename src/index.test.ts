@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import sdkPkg from "../package.json";
 import {
@@ -7,6 +8,7 @@ import {
   OS_FONT_CANDIDATES,
   SDK_VERSION,
   computeAntiReplaySignature,
+  encryptFingerprintEnvelope,
   generateNonce,
   hmacSha256Hex,
   sha256Hex,
@@ -183,10 +185,10 @@ describe("@bloume/id v1.0.0 — 70+ Signals, Anti-Spoof, Dual API (ThumbmarkJS +
     expect(fpResult.visitorId).toMatch(/^vis_/);
     expect(fpResult.requestId).toMatch(/^req_/);
     expect(typeof fpResult.visitorFound).toBe("boolean");
-    expect(fpResult.confidence.revision).toBe("1.0.0");
+    expect(fpResult.confidence.revision).toBe(SDK_VERSION);
     expect(fpResult.linkedId).toBe("acct_999");
     expect(fpResult.tag).toEqual({ flow: "signup" });
-    expect(fpResult.info.collectorCount).toBeGreaterThanOrEqual(70);
+    expect(fpResult.info.collectorCount).toBe(104);
     expect(fpResult.firstSeenAt.global).toBeTruthy();
 
     // 2. Direct load() helper + exclusions
@@ -223,47 +225,24 @@ describe("@bloume/id v1.0.0 — 70+ Signals, Anti-Spoof, Dual API (ThumbmarkJS +
     expect(r1.requestId).toBe(r2.requestId);
   });
 
-  it("sends anti-replay signed payload to endpoint when apiKey and endpoint are configured", async () => {
+  it("sends encrypted v2 AES-256-GCM envelope and parses minimal server response + sealedResult", async () => {
     const mockServerResult = {
       visitorId: "vis_72819283719283712",
-      thumbmark: "a".repeat(64),
-      hardwareHash: "b".repeat(64),
       requestId: "req_72819283719283713",
       visitorFound: true,
-      confidence: { score: 0.99, revision: "1.0.0" },
-      incognito: false,
-      browserName: "Chrome",
-      browserVersion: "131.0",
-      os: "Linux",
-      osVersion: "",
-      device: "Desktop",
-      ip: "127.0.0.1",
-      ipLocation: {},
-      firstSeenAt: { global: null, subscription: null },
-      lastSeenAt: { global: null, subscription: null },
-      components: {} as never,
-      info: {
-        dangerLevel: 0,
-        action: "allow",
-        isBot: false,
-        isSpoofed: false,
-        isIncognito: false,
-        isVpn: false,
-        isTor: false,
-        isDatacenter: false,
-        isProxy: false,
-        crossBrowserMatched: false,
-        durationMs: 12,
-        collectorCount: 72,
-      },
+      thumbmark: "a".repeat(64),
+      confidence: { score: 0.99, revision: SDK_VERSION },
+      sealedResult: "v1.stub_iv.stub_cipher.stub_tag",
     };
 
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify(mockServerResult), {
+    let capturedBody: Record<string, unknown> = {};
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify(mockServerResult), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      })
-    );
+      });
+    });
 
     const sdk = new BloumeID({
       apiKey: "bid_pub_livekey",
@@ -273,20 +252,128 @@ describe("@bloume/id v1.0.0 — 70+ Signals, Anti-Spoof, Dual API (ThumbmarkJS +
 
     const res = await sdk.get({ linkedId: "user_1" });
     expect(res.visitorId).toBe("vis_72819283719283712");
+    expect(res.thumbmark).toBe("a".repeat(64));
+    expect(res.sealedResult).toBe("v1.stub_iv.stub_cipher.stub_tag");
+    expect(res.info.collectorCount).toBe(104);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    if (globalThis.crypto?.subtle) {
+      expect(capturedBody.v).toBe(2);
+      expect(typeof capturedBody.iv).toBe("string");
+      expect(typeof capturedBody.ciphertext).toBe("string");
+      expect(capturedBody.components).toBeUndefined();
+    }
     fetchSpy.mockRestore();
+
+    const directEncrypted = await encryptFingerprintEnvelope({
+      publicKey: "bid_pub_test",
+      ts: Date.now(),
+      nonce: "nonce_test_aes_123456",
+      origin: "https://app.bloume.fr",
+      payload: { hello: "bloumeid" },
+    });
+    expect(directEncrypted?.v).toBe(2);
   });
 
-  it("validates BloumeIDServer verifyRequest and getVisitor methods", async () => {
+  it("fixes Windows x86_64 architectureHint (AppleWebKit false positive) & detects Tor Browser markers", async () => {
+    const origNav = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        ...origNav,
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+        platform: "Win32",
+        hardwareConcurrency: 12,
+        cookieEnabled: true,
+        language: "en-US",
+        languages: ["en-US"],
+      },
+    });
+    const hw = collectHardware();
+    expect(hw.architectureHint).toBe("x86_64");
+
+    const client = new BloumeID({
+      options: { exclude: ["webrtc", "audio", "webgpu", "canvas", "webgl", "fonts"] },
+    });
+    const res = await client.get();
+    expect(res.browserName).toBe("Chrome");
+    expect(res.browserVersion).toBe("158.0");
+    expect(res.os).toBe("Windows");
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: origNav });
+
+    const torProbes = await runAntiSpoofProbes({
+      canvas: { ...collectCanvas(), doubleRenderConsistent: false },
+      audio: await collectAudio(),
+      hardware: { ...hw, globalPrivacyControl: true, deviceMemory: 0 },
+      webgl: { ...collectWebGL(), vendor: "Mozilla", renderer: "Mozilla" },
+      languages: { language: "en-US", languages: ["en-US"], consistentMainLanguage: true },
+      storage: await collectStorage(),
+      timezoneIntl: { ...collectTimezoneIntl(), timezone: "Atlantic/Reykjavik" },
+      speech: { available: false, voiceCount: 0, defaultVoice: "none", voicesHash: "x" },
+      webrtc: { available: false, candidateTypes: [], localIpPresent: false, sdpFeedbackHash: "x" },
+    });
+    expect(torProbes.isTorBrowser).toBe(true);
+    expect(torProbes.reasons).toContain("Tor Browser environment signature detected");
+  });
+
+  it("validates BloumeIDServer verifyRequest, getVisitor and unsealResult AES-256-GCM decryption", async () => {
     expect(() => new BloumeIDServer({ secretKey: "invalid" })).toThrow();
 
+    const secretKey = "bid_sec_valid_secret_key";
     const server = new BloumeIDServer({
-      secretKey: "bid_sec_valid_secret_key",
+      secretKey,
       endpoint: "https://bloumeid.internal/",
     });
 
     await expect(server.verifyRequest("bad_id")).rejects.toThrow();
     await expect(server.getVisitor("bad_vis")).rejects.toThrow();
+
+    // Test local AES-256-GCM unsealResult
+    const sealPayload = {
+      verified: true,
+      requestId: "req_9999999999999999",
+      visitorId: "vis_8888888888888888",
+      siteId: "site_123",
+      thumbmark: "a".repeat(64),
+      hardwareHash: "b".repeat(64),
+      dangerLevel: 4,
+      confidence: 0.99,
+      flags: {
+        isBot: false,
+        isSpoofed: true,
+        isVpn: false,
+        isTor: true,
+        isDatacenter: false,
+        isProxy: false,
+        isIncognito: true,
+        crossBrowserMatched: false,
+      },
+      network: {
+        ipAddress: "185.220.101.4",
+        ipSubnet: "185.220.101.0/24",
+        ja4Hash: "t13d1516h2_abcdef123456_123456abcdef",
+        asnNumber: 24940,
+        asnOrg: "Tor Exit",
+        country: "DE",
+        city: "Frankfurt",
+      },
+      createdAt: new Date().toISOString(),
+    };
+    const key = crypto.createHash("sha256").update(`bloumeid-seal-v1:${secretKey}`, "utf8").digest();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(sealPayload), "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const sealedToken = `v1.${iv.toString("base64url")}.${encrypted.toString("base64url")}.${tag.toString("base64url")}`;
+
+    const unsealed = server.unsealResult(sealedToken);
+    expect(unsealed.requestId).toBe("req_9999999999999999");
+    expect(unsealed.dangerLevel).toBe(4);
+    expect(unsealed.flags.isTor).toBe(true);
+
+    const wrongServer = new BloumeIDServer({ secretKey: "bid_sec_wrong_secret_key" });
+    expect(() => wrongServer.unsealResult(sealedToken)).toThrow();
+    expect(() => server.unsealResult("v1.bad.token.here")).toThrow();
 
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")

@@ -19,7 +19,11 @@ import {
   OS_FONT_CANDIDATES,
 } from "./collectors";
 import {
+  base64UrlToBytes,
+  bytesToBase64Url,
   computeAntiReplaySignature,
+  deriveTransportAesKeyBytes,
+  encryptFingerprintEnvelope,
   generateNonce,
   hmacSha256Hex,
   sha256Hex,
@@ -32,13 +36,25 @@ import type {
   BloumeIDOptions,
   BloumeIDResult,
   CollectorName,
+  EncryptedFingerprintEnvelope,
   FingerprintComponents,
   FingerprintJSGetOptions,
+  UserAgentDataComponent,
 } from "./types";
 
-export const SDK_VERSION = "1.2.0";
+export const SDK_VERSION = "1.3.0";
 
-function parseBrowserAndOsClient(ua: string): {
+function normalizeVersionToken(raw: string): string {
+  const parts = raw.split(".").filter((p) => /^\d+$/.test(p));
+  if (parts.length === 0) return "0.0";
+  if (parts.length === 1) return `${parts[0]}.0`;
+  return `${parts[0]}.${parts[1]}`;
+}
+
+function parseBrowserAndOsClient(
+  ua: string,
+  uaData?: UserAgentDataComponent
+): {
   browserName: string;
   browserVersion: string;
   os: string;
@@ -47,22 +63,41 @@ function parseBrowserAndOsClient(ua: string): {
 } {
   let browserName = "Unknown";
   let browserVersion = "0.0";
-  const edg = ua.match(/Edg\/([\d.]+)/);
-  const chr = ua.match(/Chrome\/([\d.]+)/);
-  const ff = ua.match(/Firefox\/([\d.]+)/);
+  const edg = ua.match(/Edg(?:A|iOS)?\/([\d.]+)/);
+  const opr = ua.match(/(?:OPR|Opera)\/([\d.]+)/);
+  const chr = ua.match(/(?:Chrome|CriOS)\/([\d.]+)/);
+  const ff = ua.match(/(?:Firefox|FxiOS)\/([\d.]+)/);
   const saf = ua.match(/Version\/([\d.]+).*Safari/);
   if (edg) {
     browserName = "Edge";
-    browserVersion = edg[1] ?? "0";
+    browserVersion = normalizeVersionToken(edg[1] ?? "0");
+  } else if (opr) {
+    browserName = "Opera";
+    browserVersion = normalizeVersionToken(opr[1] ?? "0");
   } else if (chr) {
     browserName = "Chrome";
-    browserVersion = chr[1] ?? "0";
+    browserVersion = normalizeVersionToken(chr[1] ?? "0");
   } else if (ff) {
     browserName = "Firefox";
-    browserVersion = ff[1] ?? "0";
+    browserVersion = normalizeVersionToken(ff[1] ?? "0");
   } else if (saf) {
     browserName = "Safari";
-    browserVersion = saf[1] ?? "0";
+    browserVersion = normalizeVersionToken(saf[1] ?? "0");
+  }
+
+  if (uaData?.brands && uaData.brands.length > 0) {
+    const primaryBrand = uaData.brands.find(
+      (b) => !/Not[;._ -]?A[;._ -]?Brand/i.test(b.brand) && !/^Chromium$/i.test(b.brand)
+    ) ?? uaData.brands.find((b) => /Chromium/i.test(b.brand));
+    if (primaryBrand?.version) {
+      const brandMajor = primaryBrand.version.split(".")[0] ?? "";
+      if (brandMajor && browserVersion.split(".")[0] !== brandMajor) {
+        browserVersion = normalizeVersionToken(primaryBrand.version);
+      }
+      if (/Edge/i.test(primaryBrand.brand)) browserName = "Edge";
+      else if (/Opera/i.test(primaryBrand.brand)) browserName = "Opera";
+      else if (/Chrome/i.test(primaryBrand.brand)) browserName = "Chrome";
+    }
   }
 
   let os = "Unknown OS";
@@ -70,20 +105,37 @@ function parseBrowserAndOsClient(ua: string): {
   const win = ua.match(/Windows NT ([\d.]+)/);
   const mac = ua.match(/Mac OS X ([\d_]+)/);
   const andr = ua.match(/Android ([\d.]+)/);
-  if (win) {
+  const ios = ua.match(/(?:iPhone|CPU) OS ([\d_]+)/);
+  if (win || uaData?.platform === "Windows") {
     os = "Windows";
-    osVersion = win[1] ?? "10.0";
-  } else if (mac) {
+    const pvMajor = Number((uaData?.platformVersion ?? "").split(".")[0] ?? "0");
+    if (Number.isFinite(pvMajor) && pvMajor >= 13) {
+      osVersion = "11";
+    } else if (Number.isFinite(pvMajor) && pvMajor >= 1) {
+      osVersion = "10";
+    } else {
+      const nt = win?.[1] ?? "10.0";
+      if (nt === "10.0") osVersion = "10";
+      else if (nt === "6.3") osVersion = "8.1";
+      else if (nt === "6.2") osVersion = "8";
+      else if (nt === "6.1") osVersion = "7";
+      else osVersion = nt;
+    }
+  } else if (ios) {
+    os = "iOS";
+    osVersion = (ios[1] ?? "").replace(/_/g, ".");
+  } else if (mac || uaData?.platform === "macOS") {
     os = "macOS";
-    osVersion = (mac[1] ?? "").replace(/_/g, ".");
-  } else if (andr) {
+    osVersion = uaData?.platformVersion || (mac?.[1] ?? "").replace(/_/g, ".");
+  } else if (andr || uaData?.platform === "Android") {
     os = "Android";
-    osVersion = andr[1] ?? "";
-  } else if (/Linux/i.test(ua)) {
+    osVersion = uaData?.platformVersion || (andr?.[1] ?? "");
+  } else if (/Linux/i.test(ua) || uaData?.platform === "Linux") {
     os = "Linux";
+    osVersion = uaData?.platformVersion || "";
   }
 
-  const device = /Mobi|Android|iPhone|iPad/i.test(ua) ? "Mobile" : "Desktop";
+  const device = uaData?.mobile || /Mobi|Android|iPhone|iPad/i.test(ua) ? "Mobile" : "Desktop";
   return { browserName, browserVersion, os, osVersion, device };
 }
 
@@ -379,12 +431,22 @@ export class BloumeID {
         : this.withCollectorTimeout(collectMediaCodecs(), 300, undefined),
     ]);
 
+    if (!this.isExcluded("hardware") && !this.isExcluded("userAgentData")) {
+      const arch = userAgentData.architecture.toLowerCase();
+      if (arch === "x86") {
+        hardware.architectureHint = userAgentData.bitness === "32" ? "x86" : "x86_64";
+      } else if (arch === "arm") {
+        hardware.architectureHint = userAgentData.bitness === "64" ? "arm64" : "arm";
+      }
+    }
+
     const antiSpoof = this.isExcluded("antiSpoof")
       ? {
           isBot: false,
           isSpoofed: false,
           isIncognito: false,
           isVirtualMachine: false,
+          isTorBrowser: false,
           webdriver: false,
           automationArtifacts: [],
           chromeObjectAnomaly: false,
@@ -407,6 +469,9 @@ export class BloumeID {
           languages,
           storage,
           timezoneIntl,
+          mediaCodecs,
+          speech,
+          webrtc,
         });
 
     const components: FingerprintComponents = {
@@ -511,31 +576,61 @@ export class BloumeID {
     }
 
     const fpData = await this.getFingerprintData();
+    const uaParsed = parseBrowserAndOsClient(
+      fpData.components.userAgentData.userAgent,
+      fpData.components.userAgentData
+    );
 
     if (this.apiKey && (this.endpoint || typeof window !== "undefined")) {
       const baseUrl = this.endpoint || "";
       const url = `${baseUrl}/api/v1/fingerprint`;
       const timestamp = Date.now();
       const nonce = generateNonce(24);
-      const signature = computeAntiReplaySignature(
-        this.apiKey,
-        timestamp,
-        nonce,
-        fpData.fullHash,
-        fpData.hardwareHash
-      );
+      const clientOrigin =
+        typeof window !== "undefined" &&
+        window.location?.origin &&
+        window.location.origin !== "null"
+          ? window.location.origin
+          : "";
 
-      const envelope: AntiReplayEnvelope = {
-        timestamp,
-        nonce,
-        signature,
+      const innerPayload: Record<string, unknown> = {
         fullHash: fpData.fullHash,
         hardwareHash: fpData.hardwareHash,
         durationMs: fpData.durationMs,
-        linkedId: getOptions?.linkedId,
-        tag: getOptions?.tag,
+        ...(getOptions?.linkedId !== undefined ? { linkedId: getOptions.linkedId } : {}),
+        ...(getOptions?.tag !== undefined ? { tag: getOptions.tag } : {}),
         components: fpData.components,
       };
+
+      let wireEnvelope: EncryptedFingerprintEnvelope | AntiReplayEnvelope | null =
+        await encryptFingerprintEnvelope({
+          publicKey: this.apiKey,
+          ts: timestamp,
+          nonce,
+          origin: clientOrigin,
+          payload: innerPayload,
+        }).catch(() => null);
+
+      if (!wireEnvelope) {
+        const signature = computeAntiReplaySignature(
+          this.apiKey,
+          timestamp,
+          nonce,
+          fpData.fullHash,
+          fpData.hardwareHash
+        );
+        wireEnvelope = {
+          timestamp,
+          nonce,
+          signature,
+          fullHash: fpData.fullHash,
+          hardwareHash: fpData.hardwareHash,
+          durationMs: fpData.durationMs,
+          linkedId: getOptions?.linkedId,
+          tag: getOptions?.tag,
+          components: fpData.components,
+        };
+      }
 
       try {
         const controller = new AbortController();
@@ -549,31 +644,84 @@ export class BloumeID {
             "Content-Type": "application/json",
             "X-BloumeID-Key": this.apiKey,
           },
-          body: JSON.stringify(envelope),
+          body: JSON.stringify(wireEnvelope),
           signal: controller.signal,
         });
         clearTimeout(timer);
 
         if (response.ok) {
-          const serverResult = (await response.json()) as BloumeIDResult;
+          const rawServer = (await response.json()) as Partial<BloumeIDResult> & {
+            visitorId: string;
+            requestId: string;
+          };
+          const isoNowServer = new Date().toISOString();
+          const normalizedResult: BloumeIDResult = {
+            visitorId: rawServer.visitorId,
+            thumbmark: rawServer.thumbmark ?? fpData.fullHash,
+            hardwareHash: rawServer.hardwareHash ?? fpData.hardwareHash,
+            requestId: rawServer.requestId,
+            visitorFound: rawServer.visitorFound ?? false,
+            confidence: rawServer.confidence ?? {
+              score: 0.95,
+              revision: SDK_VERSION,
+              comment: `Deterministic fingerprint evaluation (v${SDK_VERSION})`,
+            },
+            incognito: rawServer.incognito ?? fpData.components.antiSpoof.isIncognito,
+            browserName: rawServer.browserName ?? uaParsed.browserName,
+            browserVersion: rawServer.browserVersion ?? uaParsed.browserVersion,
+            os: rawServer.os ?? uaParsed.os,
+            osVersion: rawServer.osVersion ?? uaParsed.osVersion,
+            device: rawServer.device ?? uaParsed.device,
+            ip: rawServer.ip ?? "",
+            ipLocation: rawServer.ipLocation ?? {
+              city: { name: null },
+              country: { code: null, name: null },
+              latitude: null,
+              longitude: null,
+              asn: { asn: null, name: null },
+            },
+            firstSeenAt: rawServer.firstSeenAt ?? { global: isoNowServer, subscription: isoNowServer },
+            lastSeenAt: rawServer.lastSeenAt ?? { global: isoNowServer, subscription: isoNowServer },
+            linkedId: rawServer.linkedId ?? getOptions?.linkedId ?? null,
+            tag: rawServer.tag ?? getOptions?.tag ?? null,
+            sealedResult: rawServer.sealedResult ?? null,
+            components: rawServer.components ?? fpData.components,
+            info: rawServer.info ?? {
+              dangerLevel: 0,
+              isBot: false,
+              isSpoofed: false,
+              isIncognito: fpData.components.antiSpoof.isIncognito,
+              isVpn: false,
+              isTor: Boolean(fpData.components.antiSpoof.isTorBrowser),
+              isDatacenter: false,
+              isProxy: false,
+              isVirtualMachine: fpData.components.antiSpoof.isVirtualMachine,
+              crossBrowserMatched: false,
+              durationMs: fpData.durationMs,
+              collectorCount: fpData.collectorCount,
+            },
+          };
+
           if (this.options.cacheLifetimeMs > 0) {
             this.cachedResult = {
               expiresAt: Date.now() + this.options.cacheLifetimeMs,
-              result: serverResult,
+              result: normalizedResult,
             };
           }
-          return serverResult;
+          return normalizedResult;
         }
       } catch {
         // Fallback to local deterministic evaluation when offline or standalone
       }
     }
 
-    const localDanger =
+    const isTorBrowserLocal = Boolean(fpData.components.antiSpoof.isTorBrowser);
+    const localDanger = Math.max(
+      isTorBrowserLocal ? (fpData.components.antiSpoof.isSpoofed ? 5 : 4) : 0,
       (fpData.components.antiSpoof.isBot ? 3 : 0) +
-      (fpData.components.antiSpoof.isSpoofed ? 2 : 0);
+        (fpData.components.antiSpoof.isSpoofed ? 2 : 0)
+    );
     const isoNow = new Date().toISOString();
-    const uaParsed = parseBrowserAndOsClient(fpData.components.userAgentData.userAgent);
 
     const localResult: BloumeIDResult = {
       visitorId: `vis_local_${fpData.hardwareHash.slice(0, 16)}`,
@@ -583,8 +731,8 @@ export class BloumeID {
       visitorFound: false,
       confidence: {
         score: fpData.components.antiSpoof.isSpoofed ? 0.72 : 0.95,
-        revision: "1.0.0",
-        comment: "Local deterministic evaluation (v1.0.0)",
+        revision: SDK_VERSION,
+        comment: `Local deterministic evaluation (v${SDK_VERSION})`,
       },
       incognito: fpData.components.antiSpoof.isIncognito,
       browserName: uaParsed.browserName,
@@ -604,6 +752,7 @@ export class BloumeID {
       lastSeenAt: { global: isoNow, subscription: isoNow },
       linkedId: getOptions?.linkedId ?? null,
       tag: getOptions?.tag ?? null,
+      sealedResult: null,
       components: fpData.components,
       info: {
         dangerLevel: Math.min(5, localDanger),
@@ -612,14 +761,14 @@ export class BloumeID {
         isSpoofed: fpData.components.antiSpoof.isSpoofed,
         isIncognito: fpData.components.antiSpoof.isIncognito,
         isVpn: false,
-        isTor: false,
+        isTor: isTorBrowserLocal,
         isDatacenter: false,
         isProxy: false,
         isVirtualMachine: fpData.components.antiSpoof.isVirtualMachine,
         crossBrowserMatched: false,
         vpn: false,
         proxy: false,
-        tor: false,
+        tor: isTorBrowserLocal,
         datacenter: false,
         bot: fpData.components.antiSpoof.isBot,
         spoofed: fpData.components.antiSpoof.isSpoofed,
@@ -654,7 +803,11 @@ export async function load(config: BloumeIDInitConfig = {}): Promise<BloumeID> {
 
 export {
   OS_FONT_CANDIDATES,
+  base64UrlToBytes,
+  bytesToBase64Url,
   computeAntiReplaySignature,
+  deriveTransportAesKeyBytes,
+  encryptFingerprintEnvelope,
   generateNonce,
   hmacSha256Hex,
   sha256Hex,

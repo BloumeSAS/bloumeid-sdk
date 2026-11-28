@@ -1,4 +1,5 @@
-import type { BloumeIDResult, FingerprintComponents } from "./types";
+import { createDecipheriv, createHash } from "node:crypto";
+import type { BloumeIDResult, FingerprintComponents, SecurityRuleAction } from "./types";
 
 export interface BloumeIDServerConfig {
   secretKey: string;
@@ -14,6 +15,8 @@ export interface VerifiedRequestResponse {
   thumbmark: string;
   hardwareHash: string;
   dangerLevel: number;
+  action?: SecurityRuleAction;
+  matchedRuleId?: string | null;
   confidence: number;
   flags: {
     isBot: boolean;
@@ -33,6 +36,13 @@ export interface VerifiedRequestResponse {
     asnOrg: string | null;
     country: string | null;
     city: string | null;
+  };
+  browser?: {
+    name: string;
+    version: string;
+    os: string;
+    osVersion: string;
+    device: string;
   };
   createdAt: string;
   components?: FingerprintComponents;
@@ -113,6 +123,49 @@ export class BloumeIDServer {
     return this.request<VisitorProfileResponse>(
       `/api/v1/visitors/${encodeURIComponent(visitorId)}`
     );
+  }
+
+  /**
+   * Decrypts and authenticates an AES-256-GCM sealedResult returned by POST /api/v1/fingerprint
+   * completely locally without a network roundtrip, using the site's bid_sec_ secretKey.
+   */
+  public unsealResult(sealedResult: string): VerifiedRequestResponse {
+    if (!sealedResult || typeof sealedResult !== "string") {
+      throw new Error("Invalid or empty sealedResult");
+    }
+    const parts = sealedResult.split(".");
+    if (parts.length !== 4 || parts[0] !== "v1") {
+      throw new Error("Unsupported sealedResult format");
+    }
+    const [, ivB64, cipherB64, tagB64] = parts;
+    if (!ivB64 || !cipherB64 || !tagB64) {
+      throw new Error("Malformed sealedResult envelope");
+    }
+
+    try {
+      const key = createHash("sha256")
+        .update(`bloumeid-seal-v1:${this.secretKey}`, "utf8")
+        .digest();
+      const iv = Buffer.from(ivB64, "base64url");
+      const ciphertext = Buffer.from(cipherB64, "base64url");
+      const authTag = Buffer.from(tagB64, "base64url");
+      if (iv.length !== 12 || authTag.length !== 16) {
+        throw new Error("Invalid AES-GCM IV or tag length");
+      }
+
+      const decipher = createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(authTag);
+      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+      const parsed = JSON.parse(plaintext) as VerifiedRequestResponse;
+      if (!parsed || typeof parsed !== "object" || !parsed.requestId || !parsed.visitorId) {
+        throw new Error("Incomplete sealedResult payload");
+      }
+      return parsed;
+    } catch (err) {
+      throw new Error(
+        `Failed to decrypt sealedResult: ${err instanceof Error ? err.message : "Authentication failed"}`
+      );
+    }
   }
 }
 

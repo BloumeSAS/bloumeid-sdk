@@ -253,6 +253,7 @@ export interface AntiSpoofComponent {
   zeroOuterDimensions?: boolean;
   stackEngineMismatch?: boolean;
   timezoneDstMismatch?: boolean;
+  isTorBrowser?: boolean;
   reasons: string[];
 }
 
@@ -349,6 +350,7 @@ export interface BloumeIDResult {
   lastSeenAt: FingerprintProSeenTimestamp;
   linkedId?: string | null;
   tag?: Record<string, unknown> | string | null;
+  sealedResult?: string | null;
   components: FingerprintComponents;
   info: FingerprintThreatInfo;
 }
@@ -363,4 +365,12 @@ export interface AntiReplayEnvelope {
   linkedId?: string;
   tag?: Record<string, unknown> | string;
   components: FingerprintComponents;
+}
+
+export interface EncryptedFingerprintEnvelope {
+  v: 2;
+  ts: number;
+  nonce: string;
+  iv: string;
+  ciphertext: string;
 }
